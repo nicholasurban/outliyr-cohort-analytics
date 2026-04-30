@@ -75,6 +75,35 @@ class SponsoredTrialAnalyticsEngineTest(unittest.TestCase):
         self.assertEqual("rhr_bpm", rhr["endpoint_key"])
         self.assertGreater(rhr["itt_mean_delta"], 0)
 
+    def test_paired_t_and_bh_fdr_fields_are_reported(self):
+        payload = self.sample_payload()
+        payload["participants"] = []
+        for idx in range(30):
+            baseline = 70 + (idx % 5)
+            payload["participants"].append(
+                {
+                    "participant_id": f"p{idx}",
+                    "status": "completed",
+                    "verified_compliance_pct": 90,
+                    "endpoints": {
+                        "sleep_score": {
+                            "baseline_values": [baseline],
+                            "intervention_values": [baseline + 4.5 + (idx % 3) * 0.2],
+                            "daily_values": [],
+                        }
+                    },
+                }
+            )
+
+        report = analyze_request(AnalyzeRequest.model_validate(payload))
+        primary = report["endpoint_results"][0]
+
+        self.assertAlmostEqual(4.7, primary["itt_mean_delta"], places=3)
+        self.assertGreater(primary["intervention_mean"], primary["baseline_mean"])
+        self.assertIsNotNone(primary["itt_delta_sd"])
+        self.assertLess(primary["paired_t_p"], 0.05)
+        self.assertLess(primary["bh_fdr_p"], 0.05)
+
 
 if __name__ == "__main__":
     unittest.main()

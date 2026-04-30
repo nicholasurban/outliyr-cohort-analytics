@@ -27,14 +27,22 @@ MIN_PER_PROTOCOL_COMPLIANCE = 75.0
 def analyze_request(req: AnalyzeRequest) -> Dict[str, Any]:
     generated_at = datetime.now(timezone.utc).isoformat()
     endpoint_results = [_endpoint_result(endpoint, req.participants) for endpoint in req.endpoints]
-    raw_p_values = [r["wilcoxon_p"] for r in endpoint_results if r["wilcoxon_p"] is not None]
-    if raw_p_values:
-        adjusted = iter(multipletests(raw_p_values, method="bonferroni")[1].tolist())
+    raw_wilcoxon_p_values = [r["wilcoxon_p"] for r in endpoint_results if r["wilcoxon_p"] is not None]
+    if raw_wilcoxon_p_values:
+        adjusted = iter(multipletests(raw_wilcoxon_p_values, method="bonferroni")[1].tolist())
         for result in endpoint_results:
             result["bonferroni_p"] = float(next(adjusted)) if result["wilcoxon_p"] is not None else None
     else:
         for result in endpoint_results:
             result["bonferroni_p"] = None
+    raw_paired_t_p_values = [r["paired_t_p"] for r in endpoint_results if r["paired_t_p"] is not None]
+    if raw_paired_t_p_values:
+        adjusted = iter(multipletests(raw_paired_t_p_values, method="fdr_bh")[1].tolist())
+        for result in endpoint_results:
+            result["bh_fdr_p"] = float(next(adjusted)) if result["paired_t_p"] is not None else None
+    else:
+        for result in endpoint_results:
+            result["bh_fdr_p"] = None
 
     charts = {
         "waterfall": [_waterfall_chart(endpoint, req.participants) for endpoint in req.endpoints],
@@ -65,6 +73,8 @@ def _endpoint_result(endpoint: Endpoint, participants: Sequence[Participant]) ->
     pp_rows = _participant_deltas(endpoint, participants, per_protocol=True)
     deltas = np.array([row["oriented_delta"] for row in rows], dtype=float)
     pp_deltas = np.array([row["oriented_delta"] for row in pp_rows], dtype=float)
+    baseline_values = np.array([row["baseline_mean"] for row in rows], dtype=float)
+    intervention_values = np.array([row["intervention_mean"] for row in rows], dtype=float)
     ci_low, ci_high = _ci95(deltas)
     wilcoxon_p = _wilcoxon_p(deltas)
     threshold = 0.0 if endpoint.responder_threshold is None else float(endpoint.responder_threshold)
@@ -76,10 +86,17 @@ def _endpoint_result(endpoint: Endpoint, participants: Sequence[Participant]) ->
         "direction": endpoint.direction,
         "n_itt": int(deltas.size),
         "n_per_protocol": int(pp_deltas.size),
+        "baseline_mean": _mean_or_none(baseline_values),
+        "baseline_sd": _sd_or_none(baseline_values),
+        "intervention_mean": _mean_or_none(intervention_values),
+        "intervention_sd": _sd_or_none(intervention_values),
         "itt_mean_delta": _round_or_none(float(np.mean(deltas))) if deltas.size else None,
+        "itt_delta_sd": _sd_or_none(deltas),
         "per_protocol_mean_delta": _round_or_none(float(np.mean(pp_deltas))) if pp_deltas.size else None,
         "ci95": {"low": ci_low, "high": ci_high},
         "cohen_d": _cohen_dz(deltas),
+        "paired_t_p": _paired_t_p(baseline_values, intervention_values),
+        "bh_fdr_p": None,
         "wilcoxon_p": wilcoxon_p,
         "bonferroni_p": None,
         "responder_rate": _round_or_none(responders / deltas.size) if deltas.size else None,
@@ -106,6 +123,8 @@ def _participant_deltas(endpoint: Endpoint, participants: Sequence[Participant],
         out.append(
             {
                 "participant_id": participant.participant_id,
+                "baseline_mean": baseline,
+                "intervention_mean": intervention,
                 "oriented_delta": _oriented_delta(endpoint, baseline, intervention),
                 "subgroups": participant.subgroups,
             }
@@ -166,11 +185,31 @@ def _wilcoxon_p(values: np.ndarray) -> Optional[float]:
         return None
 
 
+def _paired_t_p(baseline: np.ndarray, intervention: np.ndarray) -> Optional[float]:
+    if baseline.size < 2 or intervention.size < 2:
+        return None
+    try:
+        pvalue = float(stats.ttest_rel(intervention, baseline, nan_policy="omit").pvalue)
+    except ValueError:
+        return None
+    return _round_or_none(pvalue, digits=6)
+
+
 def _cohen_dz(values: np.ndarray) -> Optional[float]:
     if values.size < 2:
         return None
     sd = float(np.std(values, ddof=1))
     return None if sd == 0.0 else _round_or_none(float(np.mean(values)) / sd)
+
+
+def _mean_or_none(values: np.ndarray) -> Optional[float]:
+    return _round_or_none(float(np.mean(values))) if values.size else None
+
+
+def _sd_or_none(values: np.ndarray) -> Optional[float]:
+    if values.size < 2:
+        return None
+    return _round_or_none(float(np.std(values, ddof=1)))
 
 
 def _round_or_none(value: Optional[float], digits: int = 4) -> Optional[float]:
@@ -275,6 +314,7 @@ def _methodology(req: AnalyzeRequest) -> Dict[str, Any]:
         "statistics": [
             "Participant-level baseline and intervention means are compared as paired deltas.",
             "Cohen's dz is computed from paired deltas.",
+            "Paired t-test p values are adjusted with Benjamini-Hochberg false-discovery-rate correction.",
             "Wilcoxon signed-rank p values are Bonferroni-adjusted across endpoints.",
             "Responder rate is the share of participants above the endpoint responder threshold.",
             "Time-series confidence bands use normal 95 percent intervals around daily cohort means.",
