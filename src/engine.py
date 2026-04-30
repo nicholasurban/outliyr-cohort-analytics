@@ -325,86 +325,240 @@ def _methodology(req: AnalyzeRequest) -> Dict[str, Any]:
     }
 
 
+PAGE_W_IN = 8.5
+PAGE_H_IN = 11.0
+BRAND_BLUE = "#1E7FD2"
+BRAND_INK = "#0D1B2A"
+BRAND_MUTED = "#5B6677"
+BRAND_RULE = "#C5CCD6"
+BRAND_PANEL = "#F4F6FA"
+
+
 def _render_pdf(report: Dict[str, Any], report_hash: str) -> bytes:
     buf = io.BytesIO()
     sns.set_theme(style="whitegrid")
+    trial = report["trial"]
+    trial_label = trial.get("title", "Sponsored Trial")
+    pages: List[Tuple[str, Any]] = [
+        ("cover", None),
+        ("executive", None),
+        ("endpoints", None),
+        ("methodology", None),
+        ("safety", None),
+        ("limitations", None),
+    ]
+    chart_pages: List[Tuple[str, str, Dict[str, Any]]] = []
+    for chart in report["charts"].get("waterfall", []):
+        chart_pages.append(("Participant-Level Deltas", "Each bar is one participant's mean change from baseline.", chart))
+    for chart in report["charts"].get("time_series", []):
+        chart_pages.append(("Cohort Daily Means", "Daily cohort mean with 95% confidence band across the on-protocol window.", chart))
+    total_pages = len(pages) + len(chart_pages)
+
     with PdfPages(buf) as pdf:
-        trial = report["trial"]
-        _pdf_text_page(
-            pdf,
-            "Outliyr Sponsored Trial Cohort Report",
-            [
-                f"Trial: {trial.get('title', '')}",
-                f"Sponsor: {trial.get('sponsor_name', '')}",
-                f"Engine: {report['engine_version']}",
-                f"Generated: {report['generated_at']}",
-                f"Protocol Hash: {trial.get('protocol_hash') or 'Not Recorded'}",
-                f"Report Hash: {report_hash}",
-            ],
-            font_size=12,
-        )
-        _pdf_text_page(pdf, "Executive Summary", _executive_summary_lines(report))
-        _pdf_text_page(pdf, "Endpoint Results", _endpoint_result_lines(report))
-        _pdf_text_page(pdf, "Methodology", _methodology_lines(report))
-        _pdf_text_page(pdf, "Safety And Compliance Notes", _safety_lines(report))
-        _pdf_text_page(pdf, "Limitations And Citation", _limitations_lines(report))
-        for chart_group in ("waterfall", "time_series"):
-            for chart in report["charts"][chart_group]:
-                fig, ax = plt.subplots(figsize=(8.5, 5))
-                ax.axis("off")
-                ax.imshow(plt.imread(io.BytesIO(base64.b64decode(chart["image_base64"])), format="png"))
-                pdf.savefig(fig)
-                plt.close(fig)
+        page_num = 1
+        _draw_cover_page(pdf, report, report_hash, page_num, total_pages)
+        page_num += 1
+        _draw_executive_page(pdf, report, trial_label, report_hash, page_num, total_pages)
+        page_num += 1
+        _draw_endpoint_table_page(pdf, report, trial_label, report_hash, page_num, total_pages)
+        page_num += 1
+        _draw_section_page(pdf, "Methodology", _methodology_lines(report), trial_label, report_hash, page_num, total_pages)
+        page_num += 1
+        _draw_section_page(pdf, "Safety And Compliance", _safety_lines(report), trial_label, report_hash, page_num, total_pages)
+        page_num += 1
+        _draw_section_page(pdf, "Limitations And Citation", _limitations_lines(report), trial_label, report_hash, page_num, total_pages)
+        page_num += 1
+        for title, caption, chart in chart_pages:
+            _draw_chart_page(pdf, title, caption, chart, trial_label, report_hash, page_num, total_pages)
+            page_num += 1
     return buf.getvalue()
 
 
-def _pdf_text_page(pdf: PdfPages, title: str, lines: Sequence[str], font_size: int = 10) -> None:
-    fig, ax = plt.subplots(figsize=(8.5, 11))
-    ax.axis("off")
-    wrapped = [title, ""]
-    for line in lines:
-        if line == "":
-            wrapped.append("")
-            continue
-        wrapped.extend(textwrap.wrap(line, width=92) or [""])
-    ax.text(0.06, 0.95, "\n".join(wrapped), va="top", ha="left", fontsize=font_size, wrap=True)
+def _draw_page_chrome(fig: Any, trial_label: str, report_hash: str, page_num: int, total_pages: int) -> None:
+    """Header bar + footer rule on every non-cover page."""
+    fig.patch.set_facecolor("white")
+    fig.text(0.06, 0.965, "OUTLIYR", fontsize=10, fontweight="bold", color=BRAND_BLUE, family="DejaVu Sans")
+    fig.text(0.16, 0.965, "Sponsored Trial Cohort Report", fontsize=10, color=BRAND_MUTED, family="DejaVu Sans")
+    fig.text(0.94, 0.965, _truncate(trial_label, 48), fontsize=9, color=BRAND_MUTED, ha="right", family="DejaVu Sans")
+    fig.add_artist(plt.Line2D((0.06, 0.94), (0.945, 0.945), color=BRAND_RULE, lw=0.6, transform=fig.transFigure))
+    fig.add_artist(plt.Line2D((0.06, 0.94), (0.045, 0.045), color=BRAND_RULE, lw=0.6, transform=fig.transFigure))
+    fig.text(0.06, 0.025, f"Outliyr Confidential / Sponsor Use", fontsize=8, color=BRAND_MUTED, family="DejaVu Sans")
+    fig.text(0.50, 0.025, f"Page {page_num} of {total_pages}", fontsize=8, color=BRAND_MUTED, ha="center", family="DejaVu Sans")
+    fig.text(0.94, 0.025, f"Report {report_hash[:10]}", fontsize=8, color=BRAND_MUTED, ha="right", family="DejaVu Sans")
+
+
+def _draw_cover_page(pdf: PdfPages, report: Dict[str, Any], report_hash: str, page_num: int, total_pages: int) -> None:
+    trial = report["trial"]
+    fig = plt.figure(figsize=(PAGE_W_IN, PAGE_H_IN))
+    fig.patch.set_facecolor("white")
+    fig.add_artist(plt.Rectangle((0, 0.86), 1.0, 0.14, color=BRAND_INK, transform=fig.transFigure, zorder=0))
+    fig.text(0.06, 0.93, "OUTLIYR", fontsize=22, fontweight="bold", color="white", family="DejaVu Sans")
+    fig.text(0.06, 0.895, "SPONSORED TRIAL COHORT REPORT", fontsize=10, color="#A8C8EE", family="DejaVu Sans")
+    fig.text(0.06, 0.74, _wrap_for_cover(trial.get("title", "Sponsored Trial"), 28), fontsize=30, fontweight="bold", color=BRAND_INK, family="DejaVu Sans", va="top")
+    fig.text(0.06, 0.56, "SPONSOR", fontsize=9, color=BRAND_MUTED, family="DejaVu Sans")
+    fig.text(0.06, 0.535, trial.get("sponsor_name", "Not Recorded"), fontsize=18, color=BRAND_INK, family="DejaVu Sans")
+    fig.text(0.06, 0.49, "PRIMARY ENDPOINT", fontsize=9, color=BRAND_MUTED, family="DejaVu Sans")
+    primary = next((e for e in report.get("endpoint_results", []) if e.get("role") == "primary"), None)
+    fig.text(0.06, 0.465, primary["label"] if primary else "Not Recorded", fontsize=13, color=BRAND_INK, family="DejaVu Sans")
+    if primary:
+        fig.text(0.55, 0.49, "PARTICIPANTS", fontsize=9, color=BRAND_MUTED, family="DejaVu Sans")
+        fig.text(0.55, 0.465, f"{primary['n_itt']} ITT · {primary['n_per_protocol']} Per-Protocol", fontsize=13, color=BRAND_INK, family="DejaVu Sans")
+    meta_y = 0.36
+    fig.add_artist(plt.Line2D((0.06, 0.94), (meta_y + 0.03, meta_y + 0.03), color=BRAND_RULE, lw=0.6, transform=fig.transFigure))
+    fig.text(0.06, meta_y, "Engine", fontsize=8, color=BRAND_MUTED, family="DejaVu Sans")
+    fig.text(0.06, meta_y - 0.02, report.get("engine_version", ""), fontsize=10, color=BRAND_INK, family="DejaVu Sans")
+    fig.text(0.30, meta_y, "Generated", fontsize=8, color=BRAND_MUTED, family="DejaVu Sans")
+    fig.text(0.30, meta_y - 0.02, _short_iso(report.get("generated_at", "")), fontsize=10, color=BRAND_INK, family="DejaVu Sans")
+    fig.text(0.55, meta_y, "Protocol Hash", fontsize=8, color=BRAND_MUTED, family="DejaVu Sans")
+    fig.text(0.55, meta_y - 0.02, _truncate(trial.get("protocol_hash") or "Not Recorded", 18), fontsize=10, color=BRAND_INK, family="monospace")
+    fig.text(0.78, meta_y, "Report Hash", fontsize=8, color=BRAND_MUTED, family="DejaVu Sans")
+    fig.text(0.78, meta_y - 0.02, _truncate(report_hash, 18), fontsize=10, color=BRAND_INK, family="DejaVu Sans")
+    fig.add_artist(plt.Line2D((0.06, 0.94), (0.045, 0.045), color=BRAND_RULE, lw=0.6, transform=fig.transFigure))
+    fig.text(0.06, 0.025, "Outliyr Confidential / Sponsor Use", fontsize=8, color=BRAND_MUTED, family="DejaVu Sans")
+    fig.text(0.50, 0.025, f"Page {page_num} of {total_pages}", fontsize=8, color=BRAND_MUTED, ha="center", family="DejaVu Sans")
+    fig.text(0.94, 0.025, "outliyr.com", fontsize=8, color=BRAND_MUTED, ha="right", family="DejaVu Sans")
     pdf.savefig(fig)
     plt.close(fig)
 
 
-def _executive_summary_lines(report: Dict[str, Any]) -> List[str]:
-    endpoints = report["endpoint_results"]
-    primary = next((item for item in endpoints if item.get("role") == "primary"), endpoints[0] if endpoints else None)
+def _draw_executive_page(pdf: PdfPages, report: Dict[str, Any], trial_label: str, report_hash: str, page_num: int, total_pages: int) -> None:
+    fig = plt.figure(figsize=(PAGE_W_IN, PAGE_H_IN))
+    _draw_page_chrome(fig, trial_label, report_hash, page_num, total_pages)
+    fig.text(0.06, 0.90, "Executive Summary", fontsize=22, fontweight="bold", color=BRAND_INK, family="DejaVu Sans")
+    primary = next((e for e in report.get("endpoint_results", []) if e.get("role") == "primary"), None)
     if not primary:
-        return ["No eligible endpoint data was available for this report."]
-    return [
-        f"Primary Endpoint: {primary['label']}",
-        f"Cohort Size: {primary['n_itt']} ITT participants; {primary['n_per_protocol']} per-protocol participants.",
-        f"Mean Preferred-Direction Delta: {primary['itt_mean_delta']} with 95% CI {primary['ci95']['low']} to {primary['ci95']['high']}.",
-        f"Effect Size: Cohen's dz {primary['cohen_d']}.",
-        f"Paired T-Test P Value: {primary['paired_t_p']}; BH-FDR P Value: {primary['bh_fdr_p']}.",
-        f"Responder Count: {primary['responders']} participants; responder rate {primary['responder_rate']}.",
-        "Interpretation: Positive deltas indicate movement in the endpoint's preferred direction.",
-    ]
+        fig.text(0.06, 0.85, "No eligible endpoint data was available for this report.", fontsize=11, color=BRAND_MUTED)
+        pdf.savefig(fig)
+        plt.close(fig)
+        return
+    hero_y = 0.78
+    fig.add_artist(plt.Rectangle((0.055, hero_y - 0.08), 0.89, 0.10, facecolor=BRAND_PANEL, edgecolor=BRAND_RULE, lw=0.6, transform=fig.transFigure, zorder=0))
+    delta = primary["itt_mean_delta"]
+    fig.text(0.075, hero_y - 0.005, f"{delta:+.2f}" if isinstance(delta, (int, float)) else str(delta), fontsize=44, fontweight="bold", color=BRAND_BLUE, family="DejaVu Sans")
+    fig.text(0.30, hero_y - 0.005, "MEAN ITT DELTA", fontsize=9, color=BRAND_MUTED, family="DejaVu Sans")
+    ci = primary.get("ci95", {})
+    fig.text(0.30, hero_y - 0.025, f"95% CI {ci.get('low', '?')} to {ci.get('high', '?')}", fontsize=12, color=BRAND_INK, family="DejaVu Sans")
+    fig.text(0.30, hero_y - 0.045, f"Cohen's dz {primary.get('cohen_d', '?')}", fontsize=11, color=BRAND_INK, family="DejaVu Sans")
+    fig.text(0.30, hero_y - 0.062, f"Paired t p {primary.get('paired_t_p', '?')} / BH-FDR {primary.get('bh_fdr_p', '?')}", fontsize=10, color=BRAND_MUTED, family="DejaVu Sans")
+    fig.text(0.62, hero_y - 0.005, "RESPONDER RATE", fontsize=9, color=BRAND_MUTED, family="DejaVu Sans")
+    rate = primary.get("responder_rate", 0)
+    rate_pct = f"{float(rate) * 100:.0f}%" if isinstance(rate, (int, float)) else str(rate)
+    fig.text(0.62, hero_y - 0.030, rate_pct, fontsize=24, fontweight="bold", color=BRAND_INK, family="DejaVu Sans")
+    fig.text(0.62, hero_y - 0.055, f"{primary.get('responders', '?')} of {primary.get('n_per_protocol', '?')} per-protocol participants", fontsize=9, color=BRAND_MUTED, family="DejaVu Sans")
+    body_y = 0.65
+    fig.text(0.06, body_y, "Primary Endpoint", fontsize=11, fontweight="bold", color=BRAND_INK, family="DejaVu Sans")
+    fig.text(0.06, body_y - 0.02, primary["label"], fontsize=14, color=BRAND_INK, family="DejaVu Sans")
+    fig.text(0.06, body_y - 0.05, f"Cohort: {primary['n_itt']} ITT participants, {primary['n_per_protocol']} per-protocol participants.", fontsize=10, color=BRAND_INK, family="DejaVu Sans")
+    fig.text(0.06, body_y - 0.07, f"Baseline mean: {primary['baseline_mean']} - Intervention mean: {primary['intervention_mean']}.", fontsize=10, color=BRAND_INK, family="DejaVu Sans")
+    fig.text(0.06, body_y - 0.09, f"Wilcoxon p {primary.get('wilcoxon_p', '?')} - Bonferroni p {primary.get('bonferroni_p', '?')}.", fontsize=10, color=BRAND_INK, family="DejaVu Sans")
+    fig.text(0.06, body_y - 0.13, "Interpretation", fontsize=11, fontweight="bold", color=BRAND_INK, family="DejaVu Sans")
+    fig.text(0.06, body_y - 0.15, "Positive deltas indicate movement in the endpoint's preferred direction. ITT analysis", fontsize=10, color=BRAND_INK, family="DejaVu Sans")
+    fig.text(0.06, body_y - 0.165, "includes every enrolled participant; per-protocol restricts to verified-compliant completers.", fontsize=10, color=BRAND_INK, family="DejaVu Sans")
+    secondaries = [e for e in report.get("endpoint_results", []) if e.get("role") != "primary"]
+    if secondaries:
+        sec_y = body_y - 0.22
+        fig.text(0.06, sec_y, f"Secondary Endpoints ({len(secondaries)})", fontsize=11, fontweight="bold", color=BRAND_INK, family="DejaVu Sans")
+        for i, s in enumerate(secondaries[:4]):
+            fig.text(0.06, sec_y - 0.022 - i * 0.022, f"- {s['label']}: delta {s['itt_mean_delta']}, dz {s.get('cohen_d', '?')}, BH-FDR p {s.get('bh_fdr_p', '?')}", fontsize=10, color=BRAND_INK, family="DejaVu Sans")
+    pdf.savefig(fig)
+    plt.close(fig)
 
 
-def _endpoint_result_lines(report: Dict[str, Any]) -> List[str]:
-    if not report["endpoint_results"]:
-        return ["No endpoint rows were available."]
-    lines = []
-    for item in report["endpoint_results"]:
-        lines.extend(
-            [
-                f"{item['label']} ({item['role'].title()})",
-                f"Baseline Mean: {item['baseline_mean']}; Intervention Mean: {item['intervention_mean']}.",
-                f"ITT Mean Delta: {item['itt_mean_delta']}; Delta SD: {item['itt_delta_sd']}.",
-                f"95% CI: {item['ci95']['low']} to {item['ci95']['high']}.",
-                f"Cohen's dz: {item['cohen_d']}; Paired T-Test P: {item['paired_t_p']}; BH-FDR P: {item['bh_fdr_p']}.",
-                f"Wilcoxon P: {item['wilcoxon_p']}; Bonferroni P: {item['bonferroni_p']}.",
-                "",
-            ]
-        )
-    return lines
+def _draw_endpoint_table_page(pdf: PdfPages, report: Dict[str, Any], trial_label: str, report_hash: str, page_num: int, total_pages: int) -> None:
+    fig = plt.figure(figsize=(PAGE_W_IN, PAGE_H_IN))
+    _draw_page_chrome(fig, trial_label, report_hash, page_num, total_pages)
+    fig.text(0.06, 0.90, "Endpoint Results", fontsize=22, fontweight="bold", color=BRAND_INK, family="DejaVu Sans")
+    fig.text(0.06, 0.876, "All endpoints with intent-to-treat means, paired-delta effect sizes, and adjusted p-values.", fontsize=9, color=BRAND_MUTED, family="DejaVu Sans")
+    rows = report.get("endpoint_results", [])
+    if not rows:
+        fig.text(0.06, 0.84, "No endpoint rows were available.", fontsize=11, color=BRAND_MUTED)
+        pdf.savefig(fig)
+        plt.close(fig)
+        return
+    headers = ["Endpoint", "Role", "N (ITT/PP)", "Baseline", "Intervention", "Delta", "95% CI", "Cohen's dz", "BH-FDR p", "Bonferroni p"]
+    body = []
+    for r in rows:
+        ci = r.get("ci95", {})
+        body.append([
+            _truncate(r["label"], 22),
+            r.get("role", "").title(),
+            f"{r.get('n_itt', '?')} / {r.get('n_per_protocol', '?')}",
+            str(r.get("baseline_mean", "?")),
+            str(r.get("intervention_mean", "?")),
+            str(r.get("itt_mean_delta", "?")),
+            f"{ci.get('low', '?')} to {ci.get('high', '?')}",
+            str(r.get("cohen_d", "?")),
+            str(r.get("bh_fdr_p", "?")),
+            str(r.get("bonferroni_p", "?")),
+        ])
+    ax = fig.add_axes([0.06, 0.30, 0.88, 0.55])
+    ax.axis("off")
+    table = ax.table(cellText=body, colLabels=headers, loc="upper left", cellLoc="left", colLoc="left")
+    table.auto_set_font_size(False)
+    table.set_fontsize(8)
+    table.scale(1.0, 1.6)
+    for col_idx in range(len(headers)):
+        cell = table[(0, col_idx)]
+        cell.set_facecolor(BRAND_INK)
+        cell.set_text_props(color="white", fontweight="bold")
+    for row_idx in range(1, len(body) + 1):
+        for col_idx in range(len(headers)):
+            cell = table[(row_idx, col_idx)]
+            cell.set_facecolor("white" if row_idx % 2 else BRAND_PANEL)
+            cell.set_edgecolor(BRAND_RULE)
+    table.auto_set_column_width(col=list(range(len(headers))))
+    pdf.savefig(fig)
+    plt.close(fig)
+
+
+def _draw_section_page(pdf: PdfPages, title: str, lines: Sequence[str], trial_label: str, report_hash: str, page_num: int, total_pages: int) -> None:
+    fig = plt.figure(figsize=(PAGE_W_IN, PAGE_H_IN))
+    _draw_page_chrome(fig, trial_label, report_hash, page_num, total_pages)
+    fig.text(0.06, 0.90, title, fontsize=22, fontweight="bold", color=BRAND_INK, family="DejaVu Sans")
+    fig.add_artist(plt.Line2D((0.06, 0.20), (0.885, 0.885), color=BRAND_BLUE, lw=2.5, transform=fig.transFigure))
+    body_lines: List[str] = []
+    for line in lines:
+        if line == "":
+            body_lines.append("")
+            continue
+        body_lines.extend(textwrap.wrap(line, width=88) or [""])
+    fig.text(0.06, 0.85, "\n".join(body_lines), va="top", ha="left", fontsize=10.5, color=BRAND_INK, family="DejaVu Sans", linespacing=1.6)
+    pdf.savefig(fig)
+    plt.close(fig)
+
+
+def _draw_chart_page(pdf: PdfPages, title: str, caption: str, chart: Dict[str, Any], trial_label: str, report_hash: str, page_num: int, total_pages: int) -> None:
+    fig = plt.figure(figsize=(PAGE_W_IN, PAGE_H_IN))
+    _draw_page_chrome(fig, trial_label, report_hash, page_num, total_pages)
+    fig.text(0.06, 0.90, title, fontsize=18, fontweight="bold", color=BRAND_INK, family="DejaVu Sans")
+    endpoint_label = chart.get("endpoint_label") or chart.get("label") or ""
+    if endpoint_label:
+        fig.text(0.06, 0.876, endpoint_label, fontsize=11, color=BRAND_MUTED, family="DejaVu Sans")
+    ax = fig.add_axes([0.08, 0.18, 0.84, 0.66])
+    ax.axis("off")
+    img = plt.imread(io.BytesIO(base64.b64decode(chart["image_base64"])), format="png")
+    ax.imshow(img)
+    fig.text(0.06, 0.135, caption, fontsize=9, color=BRAND_MUTED, family="DejaVu Sans", style="italic")
+    pdf.savefig(fig)
+    plt.close(fig)
+
+
+def _truncate(value: str, max_len: int) -> str:
+    if not isinstance(value, str):
+        return str(value)
+    return value if len(value) <= max_len else value[: max_len - 1] + "..."
+
+
+def _wrap_for_cover(value: str, width: int) -> str:
+    if not isinstance(value, str):
+        value = str(value)
+    return "\n".join(textwrap.wrap(value, width=width) or [value])
+
+
+def _short_iso(value: str) -> str:
+    if not isinstance(value, str) or len(value) < 10:
+        return value or ""
+    return value[:10]
 
 
 def _methodology_lines(report: Dict[str, Any]) -> List[str]:
