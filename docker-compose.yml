@@ -1,0 +1,10 @@
+services:
+  analytics:
+    build: .
+    environment:
+      OUTLIYR_ANALYTICS_TOKEN: ${OUTLIYR_ANALYTICS_TOKEN}
+      OUTLIYR_CALLBACK_URL: ${OUTLIYR_CALLBACK_URL:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
