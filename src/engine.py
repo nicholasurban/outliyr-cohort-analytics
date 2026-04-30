@@ -4,6 +4,7 @@ import base64
 import hashlib
 import io
 import json
+import textwrap
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -328,29 +329,25 @@ def _render_pdf(report: Dict[str, Any], report_hash: str) -> bytes:
     buf = io.BytesIO()
     sns.set_theme(style="whitegrid")
     with PdfPages(buf) as pdf:
-        fig, ax = plt.subplots(figsize=(8.5, 11))
-        ax.axis("off")
         trial = report["trial"]
-        lines = [
+        _pdf_text_page(
+            pdf,
             "Outliyr Sponsored Trial Cohort Report",
-            "",
-            f"Trial: {trial.get('title', '')}",
-            f"Sponsor: {trial.get('sponsor_name', '')}",
-            f"Engine: {report['engine_version']}",
-            f"Generated: {report['generated_at']}",
-            f"Protocol hash: {trial.get('protocol_hash') or 'not recorded'}",
-            f"Report hash: {report_hash}",
-            "",
-            "Endpoint Results",
-        ]
-        for item in report["endpoint_results"]:
-            lines.append(
-                f"- {item['label']}: ITT n={item['n_itt']}, mean delta={item['itt_mean_delta']}, "
-                f"95% CI={item['ci95']['low']} to {item['ci95']['high']}, p_adj={item['bonferroni_p']}"
-            )
-        ax.text(0.06, 0.95, "\n".join(lines), va="top", ha="left", fontsize=10, wrap=True)
-        pdf.savefig(fig)
-        plt.close(fig)
+            [
+                f"Trial: {trial.get('title', '')}",
+                f"Sponsor: {trial.get('sponsor_name', '')}",
+                f"Engine: {report['engine_version']}",
+                f"Generated: {report['generated_at']}",
+                f"Protocol Hash: {trial.get('protocol_hash') or 'Not Recorded'}",
+                f"Report Hash: {report_hash}",
+            ],
+            font_size=12,
+        )
+        _pdf_text_page(pdf, "Executive Summary", _executive_summary_lines(report))
+        _pdf_text_page(pdf, "Endpoint Results", _endpoint_result_lines(report))
+        _pdf_text_page(pdf, "Methodology", _methodology_lines(report))
+        _pdf_text_page(pdf, "Safety And Compliance Notes", _safety_lines(report))
+        _pdf_text_page(pdf, "Limitations And Citation", _limitations_lines(report))
         for chart_group in ("waterfall", "time_series"):
             for chart in report["charts"][chart_group]:
                 fig, ax = plt.subplots(figsize=(8.5, 5))
@@ -359,3 +356,100 @@ def _render_pdf(report: Dict[str, Any], report_hash: str) -> bytes:
                 pdf.savefig(fig)
                 plt.close(fig)
     return buf.getvalue()
+
+
+def _pdf_text_page(pdf: PdfPages, title: str, lines: Sequence[str], font_size: int = 10) -> None:
+    fig, ax = plt.subplots(figsize=(8.5, 11))
+    ax.axis("off")
+    wrapped = [title, ""]
+    for line in lines:
+        if line == "":
+            wrapped.append("")
+            continue
+        wrapped.extend(textwrap.wrap(line, width=92) or [""])
+    ax.text(0.06, 0.95, "\n".join(wrapped), va="top", ha="left", fontsize=font_size, wrap=True)
+    pdf.savefig(fig)
+    plt.close(fig)
+
+
+def _executive_summary_lines(report: Dict[str, Any]) -> List[str]:
+    endpoints = report["endpoint_results"]
+    primary = next((item for item in endpoints if item.get("role") == "primary"), endpoints[0] if endpoints else None)
+    if not primary:
+        return ["No eligible endpoint data was available for this report."]
+    return [
+        f"Primary Endpoint: {primary['label']}",
+        f"Cohort Size: {primary['n_itt']} ITT participants; {primary['n_per_protocol']} per-protocol participants.",
+        f"Mean Preferred-Direction Delta: {primary['itt_mean_delta']} with 95% CI {primary['ci95']['low']} to {primary['ci95']['high']}.",
+        f"Effect Size: Cohen's dz {primary['cohen_d']}.",
+        f"Paired T-Test P Value: {primary['paired_t_p']}; BH-FDR P Value: {primary['bh_fdr_p']}.",
+        f"Responder Count: {primary['responders']} participants; responder rate {primary['responder_rate']}.",
+        "Interpretation: Positive deltas indicate movement in the endpoint's preferred direction.",
+    ]
+
+
+def _endpoint_result_lines(report: Dict[str, Any]) -> List[str]:
+    if not report["endpoint_results"]:
+        return ["No endpoint rows were available."]
+    lines = []
+    for item in report["endpoint_results"]:
+        lines.extend(
+            [
+                f"{item['label']} ({item['role'].title()})",
+                f"Baseline Mean: {item['baseline_mean']}; Intervention Mean: {item['intervention_mean']}.",
+                f"ITT Mean Delta: {item['itt_mean_delta']}; Delta SD: {item['itt_delta_sd']}.",
+                f"95% CI: {item['ci95']['low']} to {item['ci95']['high']}.",
+                f"Cohen's dz: {item['cohen_d']}; Paired T-Test P: {item['paired_t_p']}; BH-FDR P: {item['bh_fdr_p']}.",
+                f"Wilcoxon P: {item['wilcoxon_p']}; Bonferroni P: {item['bonferroni_p']}.",
+                "",
+            ]
+        )
+    return lines
+
+
+def _methodology_lines(report: Dict[str, Any]) -> List[str]:
+    methodology = report["methodology"]
+    analysis_sets = methodology.get("analysis_sets", {})
+    lines = [
+        f"ITT Set: {analysis_sets.get('itt', '')}",
+        f"Per-Protocol Set: {analysis_sets.get('per_protocol', '')}",
+        "",
+        "Statistical Methods:",
+    ]
+    lines.extend([f"- {item}" for item in methodology.get("statistics", [])])
+    return lines
+
+
+def _safety_lines(report: Dict[str, Any]) -> List[str]:
+    methodology = report["methodology"]
+    dropout_items = report.get("dropout_sensitivity", {}).get("items", [])
+    lines = [
+        f"Concurrent Interventions Count: {methodology.get('concurrent_interventions_count', 0)}.",
+        f"Adverse Events Count: {methodology.get('adverse_events_count', 0)}.",
+        "",
+        "Dropout Sensitivity:",
+    ]
+    if not dropout_items:
+        lines.append("No dropout sensitivity rows were available.")
+        return lines
+    for item in dropout_items:
+        lines.append(
+            f"{item['endpoint_key']}: Dropouts {item['dropout_count']}; ITT Delta {item['itt_mean_delta']}; "
+            f"Per-Protocol Delta {item['per_protocol_mean_delta']}; Gap {item['delta_gap']}."
+        )
+    return lines
+
+
+def _limitations_lines(report: Dict[str, Any]) -> List[str]:
+    trial = report["trial"]
+    return [
+        "This report summarizes an open-label sponsored product trial. It is not a randomized, blinded, placebo-controlled clinical trial.",
+        "Results may be affected by selection bias, adherence differences, concurrent interventions, device measurement error, "
+        "and regression to the mean.",
+        "Sponsor claims should describe this as Outliyr cohort evidence unless a separate regulatory or IRB-reviewed study supports "
+        "stronger language.",
+        "",
+        "Suggested Citation:",
+        f"Outliyr. {trial.get('title', 'Sponsored Trial')} Cohort Report. Engine {report['engine_version']}. "
+        f"Generated {report['generated_at']}.",
+    ]
